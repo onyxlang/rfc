@@ -130,7 +130,7 @@ yield
 puts a # => 44
 ```
 
-An atomic operation on a numeric variable returns its old value. Therefore, `a += 1` should not make sense in the example above, because it is expected to be expanded to `a = a + 1` and `a + 1` returns the old value of `a`?! However, it's possible to overload the `+=` method. In this case, atomic numbers could (and do) overload this method to modify the variable pointer, still returning the old value. Another example demonstrating it:
+An atomic operation on a numeric variable returns its old value. Therefore, `a += 1` is expected to be a volatile operation, because it expands to `a = a + 1`, which is not thread-safe? However, it's possible to overload the `+=` method. In this case, atomic numbers could (and do) overload this method to modify the variable pointer, still returning the old value. Another example demonstrating it:
 
 ```ruby
 atomic a = 42
