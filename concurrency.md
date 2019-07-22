@@ -285,6 +285,8 @@ end
 
 ```ruby
 class Stack(T)
+  @buffer : Array(T)
+
   # `atomic?` means that this method is called for both atomic and non-atomic variants.
   atomic? def initialize(capacity)
     @buffer = Array(T).new(capacity) # The atomicity is passed to the Array's #new method
