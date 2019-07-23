@@ -110,9 +110,13 @@ end
 
 A complementary way to deal with race conditions is to mark a variable or an object as `atomic`. Contextually this means that all operations applied to this object are guaranteed to be atomic (*sic!*). Depending on the type, such operations are usually expected to return the former (meaningful) value.
 
-Just like with the `const` keyword, an `atomic` (or `atomic?`) method overload is attempted to be called, raising in compilation-time if not found. A non-atomic method is called `volatile`. An atomic method would be called for a non-atomic object if volatile alternative is absent. In contrary, you can explicitly call a volatile method from an atomic method if you specify the `volatile` keyword right before the call.
+Just like with the `const` keyword, an `atomic` method overload is attempted to be called on an atomic object, raising in compilation-time if not found. A non-atomic method is called `volatile`. An atomic method would still be called for a non-atomic object if volatile alternative is absent. However, you can explicitly call a volatile method if you apply the `volatile` modifier for the call (e.g. `@buffer.(volatile)push(x)`).
 
-Always remember that atomicity usually has a performance cost depending on the implementation.
+Within methods of an atomic object, the atomicity property is forwarded to instance variables method calls, recursively.
+
+Atomicity is a compiler feature. It only affects which methods are called in which scope. The atomicity property is not stored anywhere in the runtime. It does not affect the size of runtime objects.
+
+Always remember that atomicity usually has a performance cost depending on the implementation. You should carefully choose between racing guarantees and speed.
 
 Here goes an example of an atomic variable:
 
@@ -161,10 +165,15 @@ c = (b = false)
 puts c # => false
 ```
 
-Apart from variables, objects can be marked atomic as well. Though you can not apply `atomic` constraint to immutable literals themselves, e.g. numbers. Otherwise, `atomic const` is acceptable for an object(but doesn't always make sense).
+Apart from variables, objects can be marked atomic as well. However, neither primitves nor structs can have this property themselves, as they're copied by value. Otherwise, the atomicity property is acceptable for classes. You also can apply both `atomic` and `const` to a class instance, though it does not always make sense.
 
 ```ruby
-a = atomic 42 # You cannot modify 42 itself, so it's not allowed
+a = atomic 42 # Numbers are passed by value, you cannot mark them as atomic
+atomic a = 42 # Legit
+
+struct Foo; property bar : String; end
+f = atomic Foo.new("baz") # Nope
+atomic f = Foo.new("baz") # Ok
 
 b = atomic const [1, 2] # Doesn't make much sense in this context, but allowed
 c = atomic const Stack.new(3) # Non-resizeable atomic stack — perfectly legit
@@ -174,9 +183,36 @@ b << 3 # An atomic push, which would atomically resize the array if needed
 
 h = atomic {"foo" => "bar"}
 h.delete("foo") # Atomically delete the "foo" key
+
+n = atomic {foo: "bar"} # That's a named tuple, not a hash. Deny!
+atomic n = {foo: "bar"} # Ok, but useless
 ```
 
-You can mix variable and its value atomicity:
+You should always think that object modifiers are applied to the expression result itself, not the intermediate chain calls. You can imagine `atomic const` being some magic method call which applies these properties to its argument. In fact, you actually can wrap the expression in parenthesis:
+
+```ruby
+stack = atomic const (Stack.new(3))
+```
+
+Now it should be clear that the `new` method call is neither atomic nor const itself! Under the hood, the `volatile mutable static def new` is called. If you really need to call exactly the atomic `new`, use the call modifiers:
+
+```ruby
+stack = atomic const (Stack.(atomic const)new(3))
+stack.push(42) # Atomic
+```
+
+That's a bit cumbersome, indeed, but for greater good. It also can be avoided, for example, by keeping in mind that marking the *variable* atomic would imply atomic calls everywhere. So the example above should practically be the same as:
+
+```ruby
+atomic const stack = Stack.new(3)
+stack.push(42) # Still atomic
+
+# Unless the stack object itself is assigned to another variable
+foo = stack
+foo.push(42) # Not atomic anymore
+```
+
+You can mix variable and its value atomicity (not applicable for neither primitives nor structs, as mentioned above):
 
 ```ruby
 a = [1]
@@ -233,7 +269,21 @@ puts e # [0] (new value)
 puts c # [0] (new value)
 ```
 
-You can mark an object definition itself as `atomic` making it explicitly atomic (and therefore thread-safe) by default. A `Mutex` class itself is a good example.
+You can mark an object definition itself as `atomic` making it implicitly atomic (and therefore thread-safe) by default. A `Mutex` class itself is a good example. However, it is possible to define such an object as volatile:
+
+```ruby
+atomic class Mutex
+  # Implicitly `atomic def lock`.
+  def lock
+  end
+end
+
+m1 = Mutex.new # Implicitly atomic
+m1.lock # Atomic
+
+m2 = volatile Mutex.new # Would try to call volatile methods from now
+m2.lock # Lookup for `volatile def lookup`, but still call the atomic variant instead
+```
 
 Function arguments can be atomic as well, which would imply atomicity in current scope only. Once an argument is out of the function scope, it stops being atomic:
 
@@ -255,11 +305,11 @@ fill(ary)
 ary << 2 # Also non-atomic push
 ```
 
-You can call an atomic method on a non-atomic object using the same `atomic` keyword:
+Just a reminder, you can call an atomic method on a non-atomic object using the same `atomic` keyword as a call modifier:
 
 ```ruby
 ary = [1, 2]
-puts(atomic ary.push) # => [1, 2, 3]
+puts ary.(atomic)push # => [1, 2, 3]
 ```
 
 ### Stack example
@@ -285,11 +335,13 @@ end
 
 ```ruby
 class Stack(T)
-  @buffer : Array(T)
+  # The instance variable to the buffer itself is constant,
+  # you can not change the buffer of a stack. This expression
+  # is contextually different from `@buffer : const Array(T)`.
+  const @buffer : Array(T)
 
-  # `atomic?` means that this method is called for both atomic and non-atomic variants.
-  atomic? def initialize(capacity)
-    @buffer = Array(T).new(capacity) # The atomicity is passed to the Array's #new method
+  def initialize(capacity)
+    @buffer = Array(T).new(capacity)
   end
 
   # Calling sync `#push` on a `const Stack` raises if it's currently full.
@@ -302,8 +354,9 @@ class Stack(T)
       # must explicitly call it with `variable` keyword.
       #
       # We've already aquired the buffer lock, no need
-      # to call atomic push here
-      volatile variable @buffer.push(value)
+      # to call atomic push here. In fact, attempting to
+      # re-aquire the lock would result in deadlock
+      @buffer.(volatile mutable)push(value)
       lock.release
     else
       raise "Is full"
@@ -316,26 +369,26 @@ class Stack(T)
       yield
     end
 
-    volatile variable @buffer.push(value)
+    @buffer.(volatile mutable)push(value)
     lock.release
   end
 
   # Variable push implementation, allowing to resize if needed.
   # This definition covers both atomic and non-atomic variants.
-  atomic? def push(value : T) # The `variable` modificator is implicit
+  atomic def push(value : T) # The `variable` modificator is implicit
     # An atomic or non-atomic `Array#push` is called depending on the actual call atomicity
     @buffer.push(value)
   end
 
   # `#pop` doesn't contextually change the stack itself, so it's always const.
-  atomic? const def pop
+  atomic const def pop
     result = @buffer.pop?
     raise "Is empty" unless result
     return result
   end
 
   # Waits until a value is popped.
-  async atomic? const def pop
+  async atomic const def pop
     until result = @buffer.pop?
       yield
     end
@@ -349,7 +402,7 @@ end
 
 By default, there is no direct access to threads in an Onyx program. Parallelism is achieved via scheduler which distributes coroutines among the threads. Onyx has an abstract scheduler implementation, which is single-threaded by default.
 
-To enable multi-threading, a user has to require a desired threaded scheduler implementation. Luckily, it is implicit in common toolchains. Depending on the target and stdlib selected, a default threads implementation may be selected by the compiler.
+To enable multi-threading, a user has to require a desired threaded scheduler implementation. Luckily, it is implicit in common toolchains (e.g. Ubuntu). Depending on the target and/or stdlib selected, a default threads implementation may be selected by the compiler.
 
 However, a user is free to provide their own custom multi-threaded scheduler implementation if needed.
 
