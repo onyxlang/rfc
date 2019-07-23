@@ -313,21 +313,32 @@ m2.lock # Lookup for `volatile def lookup`, but still call the atomic variant in
 Function arguments can be atomic as well, which would imply atomicity in current scope only. Once an argument is out of the function scope, it stops being atomic:
 
 ```ruby
-ary = [0]
-
 def fill(atomic ary : Array(Int32), number : UInt)
   number.times do
     async do
-      ary.push(rand(100)) # Atomic push
+      ary.push(rand(100)) # Guaranteed atomic push
     end
   end
 
   yield
 end
 
+ary = [0]
 ary << 1 # Non-atomic push
-fill(ary)
+fill(ary) # Guaranteed to do atomic fill despite of the argument atomicity
 ary << 2 # Also non-atomic push
+```
+
+However, you cannot pass an atomic object to a function which expects a volatile object:
+
+```ruby
+def foo(volatile ary : Array)
+  ary.push(42) # The volatile push
+end
+
+ary = atomic [0]
+foo(ary) # Nope, we need guarantees
+foo(volatile ary) # Ok
 ```
 
 Just a reminder, you can call an atomic method on a non-atomic object using the same `atomic` keyword as a call modifier:
