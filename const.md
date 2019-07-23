@@ -1,114 +1,148 @@
 # Const
 
-A variable can be defined as `const`, so it's not a *variable* anymore. Basically, a const variable can not be re-assigned and a const object (which the const variable implies) can not be called with a non-const method (it's not a strict requirement, though).
+`const`, just like `atomic`, is a compilation-time modifier, which can be applied both to variables and their pointees. The modifier applies the constant-ness property to an entity. Essentially, this property restricts calling non-constant methods on neither the object itself nor its instance variables. An antonym of being constant is being `mutable`.
+
+Here go some examples:
 
 ```ruby
-foo = 2
-foo = 3 # Ok
-
-const bar = 2
-bar = 3 # Compilation-time error
-
-qux = [1, 2]
-qux << 3 # Ok
-
-const quux = [1, 2]
-quux << 3 # Compilation-time error
+const foo = 2
+foo = 3 # Error, cannot reassign const variable
 ```
 
-You can mix variable and object constant-ness, which would mean different things:
+```ruby
+const foo = [1, 2]
+foo << 3 # Error, cannot call a mutable method on a const variable
+```
 
 ```ruby
 const foo = const [1, 2]
-foo = 42 # Cannot reassign const variable
-foo << 3 # Cannot call a non-const method on a const object
-bar = foo
-bar << 3 # Error, because bar references const object
+foo = 42 # Error, cannot reassign const variable
+foo << 3 # Error, cannot call a mutable method on a const variable
 
-foo = const [1, 2]
-foo = 42 # Ok
-foo << 3 # Error
 bar = foo
-bar << 3 # Error
-
-const foo = [1, 2]
-foo = 42 # Error
-foo << 3 # Error
-bar = foo
-bar << 3 # Ok, because bar references [1, 2], which is non-const by itself
+bar << 3 # Error, because bar still references the const object
 ```
-
-Object methods can be declared as `const` which means that they would not modify the object itself (including modifying both instance and static variables). It implies a restriction on calling another non-const methods implicitly from within it. However, it can be overcome with the explicit `variable` keyword.
 
 ```ruby
-class Array
-  const def [](index)
-    get(index)
-  end
+foo = const [1, 2]
+foo << 3 # Error, cannot call a mutable method on a const variable
 
-  def []=(index, value)
-    set(index, value)
-  end
+bar = foo
+bar << 3 # Still error
 
-  const def poison(value)
-    self.[rand] = value # Compilation-time error; []= method is non-const (i.e. variable)
-    variable self.[rand] = value # Ok, if you really want to
-  end
-end
+foo = 42 # Ok, because foo variable is not const itself
 ```
 
-Function arguments can be declared `const` as well, which would imply constant-ness in the current scope only.
+```ruby
+const foo = [1, 2]
+foo = 42 # Error, because foo variable is const
+foo << 3 # Ok, the array is mutable itself
+
+bar = foo
+bar << 3 # Also ok
+```
+
+The constant-ness aims to help a developer to avoid occasionally changing a contextually constant value. However, it is absolutely possible to overcome the constant-ness property explicitly using the notorius `mutable` keyword.
+
+Object methods can be declared as `const` which means that they're permitted to neither:
+
+  * Call mutable instance methods on the object itself,
+    unless the call is modified with the `mutable` modifier
+
+    ```ruby
+    class Foo
+      # An implicitly mutable method.
+      def bar
+      end
+
+      const def baz
+        bar # Compilation-time error, because `#bar` is mutable
+        (mutable)bar # Ok
+        self.(mutable)bar # Ok
+      end
+    end
+    ```
+
+  * Re-assign instance variables, unless they (instance variables) are marked `mutable`
+
+    ```ruby
+    class Foo
+      @bar : String
+
+      const def baz
+        @bar = "baz" # Compilation-time error
+        @bar.(mutable)=("baz") # Ok
+        @bar.(mutable) = "baz" # Ok
+      end
+    end
+    ```
+
+    ```ruby
+    class Foo
+      mutable @bar : String
+
+      const def baz
+        @bar = "baz" # Ok
+      end
+    end
+    ```
+
+  * Call mutable methods on instance variables, unless their pointees are marked `mutable`
+
+    ```ruby
+    class Foo
+      @bar : Array(Int32)
+
+      const def baz
+        @bar[0] *= 2 # Compilation-time error
+        @bar.(mutable)[0] = @bar[0] * 2 # Ok
+      end
+    end
+    ```
+
+    ```ruby
+    class Foo
+      @bar : mutable Array(Int32)
+
+      const def baz
+        @bar[0] *= 2 # Ok
+      end
+    end
+    ```
+
+Just like with `atomic`, a const method would be called on a mutable object if its mutable variant is absent. Likewise, an whole object can be marked `const`, so its method are implicitly const by default, carrying the same restrictions. However, `atomic` does not imply `const`!
+
+Function arguments can be declared `const` as well, which would imply constant-ness in the current scope only:
 
 ```ruby
 def foo(const ary : Array(Number))
-  ary << 43 # Compilation-time error
+  ary << 43 # Compilation-time error, cannot call mutable method const array
+  ary.(mutable) << 43 # Would work
+end
+
+def bar(const ary : Array(Number))
+  # Do nothing mutable; ary is a constant here
 end
 
 ary = [1, 2]
 ary << 42 # Ok
-foo(ary)
-ary << 44 # Also Ok
+bar(ary) # The array would be constant within the method
+ary << 44 # Also ok, the array is still mutable outside
 ```
 
-You can call constant methods on variables using the same `const` keyword:
+However, you cannot imply an explicit mutability to a const argument:
 
 ```ruby
-ary = [1, 2]
-const ary << 43 # Nope
-ary << 44 # Ok
-```
-
-Nested objects constant-ness propagation example:
-
-```ruby
-class Post
-  const @user : User
-  getter user
-
-  property content : String
+def foo(ary : Array(Number))
+  ary << 43
 end
 
-class User
-  property id : Int32
-  property settings : Settings?
+def bar(mutable ary : Array(Number))
+  ary << 44
 end
 
-class Settings
-  property foo : String
-end
-
-post = Post.new(
-  user: User.new(
-    id: 42,
-    settings: Setting.new(
-      foo: "bar"
-    )
-  ),
-  content: "Hello World!")
-
-post.content = "Bye World!" # Legit
-post.user = User.new(id: 43) # Illegal, basically because there is no setter method
-post.user.id = 43 # Still illegal, because @user is const, and `id =` is variable
-variable post.user.id = 43 # Legal, but requires explicitness
-post.user.settings.foo = "baz" # Ok, as we don't change the @user itself
+ary = const [1, 2]
+foo(ary) # Error, because foo sees a const array, so << cannot be called on it
+bar(ary) # Error, because bar expects mutable arrays only
+bar(mutable ary) # Ok
 ```
