@@ -48,6 +48,11 @@ class HTTP::Client
   static def get(url : String)
     @socket.gets_to_end
   end
+
+  # Another sync method
+  static def blocking_get(url : String)
+    get(url) # Implicitly calls to a sync method, because blocking_get is itself sync
+  end
 end
 
 promise = HTTP::Client.get("https://google.com")
@@ -55,6 +60,22 @@ puts promise.type # Promise(String)
 
 response = await promise # Or `promise.await`; would block the thread
 puts response
+```
+
+You can force (a)sync method call using the `(a)sync` modifier:
+
+```ruby
+response = HTTP::Client.(sync)get("https://google.com")
+
+# Although it's the same as:
+response = await HTTP::Client.get("https://google.com")
+```
+
+```ruby
+promise = HTTP::Client.(async)blocking_get("https://google.com")
+
+# Although it's the same as:
+promise = async HTTP::Client.blocking_get("https://google.com")
 ```
 
 ## Select
@@ -110,7 +131,9 @@ end
 
 A complementary way to deal with race conditions is to mark a variable or an object as `atomic`. Contextually this means that all operations applied to this object are guaranteed to be atomic (*sic!*). Depending on the type, such operations are usually expected to return the former (meaningful) value.
 
-Just like with the `const` keyword, an `atomic` method overload is attempted to be called on an atomic object, raising in compilation-time if not found. A non-atomic method is called `volatile`. An atomic method would still be called for a non-atomic object if volatile alternative is absent. However, you can explicitly call a volatile method if you apply the `volatile` modifier for the call (e.g. `@buffer.(volatile)push(x)`).
+Just like with the `const` keyword, an `atomic` method overload is attempted to be called on an atomic object, raising in compilation-time if not found. A non-atomic entity is also called `volatile`. An atomic method would still be called for a non-atomic object if volatile alternative is absent. However, you can explicitly call a volatile method if you apply the `volatile` modifier for the call (e.g. `@buffer.(volatile)push(x)`).
+
+Also note that `const` methods are considered atomic by default! You can explicitly declare `volatile const def foo` to avoid that.
 
 Within methods of an atomic object, the atomicity property is forwarded to instance variables method calls, recursively.
 
@@ -165,26 +188,28 @@ c = (b = false)
 puts c # => false
 ```
 
-Apart from variables, objects can be marked atomic as well. However, neither primitves nor structs can have this property themselves, as they're copied by value. Otherwise, the atomicity property is acceptable for classes. You also can apply both `atomic` and `const` to a class instance, though it does not always make sense.
+Apart from variables, objects can be marked atomic as well. You also can apply both `atomic` and `const` to an object instance, though it does not always make sense. Note that you will learn about mixing variables and their pointees (i.e. values) atomicity in a section below.
 
 ```ruby
-a = atomic 42 # Numbers are passed by value, you cannot mark them as atomic
-atomic a = 42 # Legit
+a = atomic 42 # Legit
+atomic a = 42 # Also legit
+atomic a = atomic 42 # Still legit. It's the mixing thing discussed below
 
 struct Foo; property bar : String; end
-f = atomic Foo.new("baz") # Nope
+f = atomic Foo.new("baz") # Ok
 atomic f = Foo.new("baz") # Ok
+atomic f = atomic Foo.new("baz") # Ok
 
 b = atomic const [1, 2] # Doesn't make much sense in this context, but allowed
 c = atomic const Stack.new(3) # Non-resizeable atomic stack — perfectly legit
 
-b = atomic [1, 2]
+b = atomic [1, 2] # Ok
 b << 3 # An atomic push, which would atomically resize the array if needed
 
-h = atomic {"foo" => "bar"}
+h = atomic {"foo" => "bar"} # Atomic hashes is a real thing
 h.delete("foo") # Atomically delete the "foo" key
 
-n = atomic {foo: "bar"} # That's a named tuple, not a hash. Deny!
+n = atomic {foo: "bar"} # Legit, but what's the point? It's a constant NamedTuple
 atomic n = {foo: "bar"} # Ok, but useless
 ```
 
@@ -194,14 +219,14 @@ You should always think that object modifiers are applied to the expression resu
 stack = atomic const (Stack.new(3))
 ```
 
-Now it should be clear that the `new` method call is neither atomic nor const itself! Under the hood, the `volatile mutable static def new` is called. If you really need to call exactly the atomic `new`, use the call modifiers:
+Now it should be clear that the `new` method call is neither atomic nor const itself! Though constant-ness is not applicable to static methods. Anyway, under the hood the `volatile static def new` is called. If you really need to call exactly the atomic `new`, use the call modifiers:
 
 ```ruby
-stack = atomic const (Stack.(atomic const)new(3))
+stack = atomic const (Stack.(atomic)new(3))
 stack.push(42) # Atomic
 ```
 
-That's a bit cumbersome, indeed, but for greater good. It also can be avoided, for example, by keeping in mind that marking the *variable* atomic would imply atomic calls everywhere. So the example above should practically be the same as:
+That's a bit cumbersome, indeed, but for greater good. It also can be avoided, for example, by keeping in mind that marking the *variable* atomic would imply atomic calls everywhere, and that you don't often need atomic initializers. So the example above should practically be the same as:
 
 ```ruby
 atomic const stack = Stack.new(3)
@@ -212,7 +237,7 @@ foo = stack
 foo.push(42) # Not atomic anymore
 ```
 
-You can mix variable and its value atomicity (not applicable for neither primitives nor structs, as mentioned above):
+As seen above, you can mix variable and its pointee atomicity. Here go some examples to help to understand it better:
 
 ```ruby
 a = [1]
@@ -318,7 +343,7 @@ Atomic stacks can be used as replacement for Crystal's `Channel(T)` class.
 
 ```ruby
 # `const` is contextual constant-ness. In this case it means that Stack is of fixed size
-stack = atomic const Stack(Int32).new(3)
+atomic const stack = Stack(Int32).new(3)
 
 3.times do |i|
   async do
@@ -368,7 +393,7 @@ class Stack(T)
     end
   end
 
-  # Async variant waits for free space instead of raising.
+  # Async variant waits for free space instead of raising immediately.
   async atomic const def push(value : T)
     until lock = @buffer.lock?(@buffer.size < @buffer.capacity)
       yield
@@ -378,14 +403,14 @@ class Stack(T)
     lock.release
   end
 
-  # Implicitly volatile const push, which could lead to
-  # unwanted resize in a multi-threaded programs.
+  # The volatile const push, which could lead to
+  # unwanted resize in a multi-threaded program.
   const def push(value : T)
     raise "Is full" if @buffer.size == @buffer.capacity
     @buffer.push(value)
   end
 
-  # ditto
+  # ditto, but async
   async const def push(value : T)
     until @buffer.size == @buffer.capacity
       yield
@@ -402,15 +427,17 @@ class Stack(T)
     @buffer.push(value)
   end
 
-  # `#pop` doesn't contextually change the stack itself, so it's always const.
-  atomic const def pop
+  # `#pop` doesn't contextually change the stack itself,
+  # so it's always const and implicitly atomic
+  # (atomicity is inherited from the `const` property here).
+  const def pop
     result = @buffer.pop?
     raise "Is empty" unless result
     return result
   end
 
   # Wait until a value is popped.
-  async atomic const def pop
+  async const def pop
     until result = @buffer.pop?
       yield
     end
