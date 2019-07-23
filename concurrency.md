@@ -335,10 +335,15 @@ end
 
 ```ruby
 class Stack(T)
-  # The instance variable to the buffer itself is constant,
-  # you can not change the buffer of a stack. This expression
-  # is contextually different from `@buffer : const Array(T)`.
-  const @buffer : Array(T)
+  # The instance variable of the buffer is always constant,
+  # because you can not change the buffer of a stack.
+  #
+  # The buffer itself is always mutable, because we don't
+  # want constant Array when the stack is constant.
+  #
+  # The atomicity of the `@buffer` variable is
+  # inherited from the current stack atomicity.
+  const @buffer : mutable Array(T)
 
   def initialize(capacity)
     @buffer = Array(T).new(capacity)
@@ -346,17 +351,17 @@ class Stack(T)
 
   # Calling sync `#push` on a `const Stack` raises if it's currently full.
   atomic const def push(value : T)
-    # Array#lock? is a mutex lock wrapper
+    # `atomic def Array#lock?` is a mutex lock wrapper
     lock = @buffer.lock?(@buffer.size < @buffer.capacity)
 
     if lock
-      # Array doesn't have const push method, therefore
-      # must explicitly call it with `variable` keyword.
+      # We've already aquired the buffer lock,
+      # no need to call atomic push here;
+      # using `volatile` modifier then.
       #
-      # We've already aquired the buffer lock, no need
-      # to call atomic push here. In fact, attempting to
-      # re-aquire the lock would result in deadlock
-      @buffer.(volatile mutable)push(value)
+      # In fact, attempting to re-aquire the lock
+      # would result in deadlock
+      @buffer.(volatile)push(value)
       lock.release
     else
       raise "Is full"
@@ -369,14 +374,31 @@ class Stack(T)
       yield
     end
 
-    @buffer.(volatile mutable)push(value)
+    @buffer.(volatile)push(value)
     lock.release
   end
 
-  # Variable push implementation, allowing to resize if needed.
+  # Implicitly volatile const push, which could lead to
+  # unwanted resize in a multi-threaded programs.
+  const def push(value : T)
+    raise "Is full" if @buffer.size == @buffer.capacity
+    @buffer.push(value)
+  end
+
+  # ditto
+  async const def push(value : T)
+    until @buffer.size == @buffer.capacity
+      yield
+    end
+
+    @buffer.push(value)
+  end
+
+  # Mutable push implementation, allowing to resize if needed.
   # This definition covers both atomic and non-atomic variants.
-  atomic def push(value : T) # The `variable` modificator is implicit
-    # An atomic or non-atomic `Array#push` is called depending on the actual call atomicity
+  atomic def push(value : T) # The `mutable` modificator is implicit
+    # An atomic or non-atomic `Array#push` is called
+    # depending on the actual call atomicity
     @buffer.push(value)
   end
 
@@ -387,7 +409,7 @@ class Stack(T)
     return result
   end
 
-  # Waits until a value is popped.
+  # Wait until a value is popped.
   async atomic const def pop
     until result = @buffer.pop?
       yield
